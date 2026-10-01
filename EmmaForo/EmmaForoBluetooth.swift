@@ -56,6 +56,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     @Published private(set) var serialNumber = ""
     @Published private(set) var firmwareVersion = ""
     @Published private(set) var offeredFirmware = ""
+    @Published private(set) var firmwareUpdating = false
     @Published private(set) var colorPreset: Data?
     @Published private(set) var colorPresetAck = 0
 
@@ -106,11 +107,34 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         return false
     }
 
+    var firmwareUpdateWindow: Bool { firmwareIsQuiet }
+
     var newerFirmware: String? {
-        guard let offered = Int(offeredFirmware), let running = Int(firmwareVersion), offered > running else {
+        guard let offered = versionParts(offeredFirmware), let running = versionParts(firmwareVersion) else {
             return nil
         }
-        return offeredFirmware
+        let count = max(offered.count, running.count)
+        for index in 0..<count {
+            let left = index < offered.count ? offered[index] : 0
+            let right = index < running.count ? running[index] : 0
+            if left > right { return offeredFirmware }
+            if left < right { return nil }
+        }
+        return nil
+    }
+
+    private func versionParts(_ text: String) -> [Int]? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        let pieces = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        if pieces.isEmpty { return nil }
+        var numbers: [Int] = []
+        for piece in pieces {
+            if piece.isEmpty || !piece.allSatisfy(\.isNumber) { return nil }
+            guard let value = Int(piece) else { return nil }
+            numbers.append(value)
+        }
+        return numbers
     }
 
     static let shared = EmmaForoBluetooth()
@@ -255,6 +279,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             status = "Collega prima EmmaForo"
             return
         }
+        firmwareUpdating = true
         let until = Date().addingTimeInterval(120)
         firmwareQuietUntil = until
         connectionRequested = false
@@ -444,6 +469,48 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         connectedNetworkName = ""
         boardHasPassword = false
         hasWifiStatus = true
+    }
+
+    func applyLinkInfo(_ info: EmmaForoBoardInfo) {
+        guard !isReady else { return }
+        if !info.name.isEmpty { deviceName = info.name }
+        connectedNetworkName = info.wifi_saved ? info.wifi : ""
+        hasWifiStatus = true
+        boardHasPassword = info.password_saved
+        safeCharging = info.safe
+        chargePaused = info.paused
+        gentleCharge = info.gentle
+        hasChargeReport = true
+        serialNumber = info.serial
+        firmwareVersion = info.firmware
+        battery = BatteryStatus(
+            percent: min(max(info.percentage, 0), 100),
+            voltageMillivolts: info.voltage_mv,
+            chargeState: info.charge_status,
+            charging: info.charging,
+            fault: info.fault,
+            valid: info.estimated)
+        if let preset = dataFromHex(info.preset), preset.count == colorPresetSize {
+            colorPreset = preset
+        }
+        if !firmwareIsQuiet {
+            firmwareUpdating = false
+        }
+    }
+
+    private func dataFromHex(_ text: String) -> Data? {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count == colorPresetSize * 2 else { return nil }
+        var data = Data()
+        data.reserveCapacity(colorPresetSize)
+        var index = cleaned.startIndex
+        while index < cleaned.endIndex {
+            let next = cleaned.index(index, offsetBy: 2)
+            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data.count == colorPresetSize ? data : nil
     }
 
     func applyRemoteBattery(_ reading: EmmaForoBattery) {
@@ -650,6 +717,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         isReady = ssidCharacteristic != nil && passwordCharacteristic != nil && applyCharacteristic != nil
         isBusy = false
         status = isReady ? "Connesso" : "Comandi incompleti"
+        if isReady {
+            firmwareUpdating = false
+        }
         if let networkStatusCharacteristic {
             peripheral.setNotifyValue(true, for: networkStatusCharacteristic)
             peripheral.readValue(for: networkStatusCharacteristic)
@@ -716,6 +786,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         }
         if characteristic.uuid == firmwareApproveUUID {
             if error != nil {
+                firmwareUpdating = false
                 firmwareQuietUntil = nil
                 firmwareReconnect?.cancel()
                 status = "Errore conferma firmware"

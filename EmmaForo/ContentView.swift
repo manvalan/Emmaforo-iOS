@@ -221,11 +221,21 @@ struct ContentView: View {
         .onChange(of: bluetooth.isOutOfRange) { _, outOfRange in
             guard outOfRange else { return }
             Task { await deliverPendingRemotely() }
+            Task { await refreshBoardInfo() }
         }
         .onChange(of: tab) { _, value in
             if value == 1 { readPowerOnce() }
             if value == 2 { loadColors() }
             if value == 3 { readPowerOnce() }
+            if value == 0 || value == 1 || value == 3 {
+                Task { await refreshBoardInfo() }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                await refreshBoardInfo()
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+            }
         }
         .onAppear {
             colorsDirty = UserDefaults.standard.bool(forKey: colorDirtyKey)
@@ -351,6 +361,16 @@ struct ContentView: View {
                     Text(bluetooth.hasChargeReport ? (bluetooth.gentleCharge ? "Gentile" : "Normale") : "—")
                 }
                 Text(chargerNotice)
+                if bluetooth.battery.charging {
+                    Text("In ricarica")
+                    LabeledContent("Durata ricarica stimata") {
+                        Text(chargeDurationText)
+                    }
+                } else if bluetooth.chargePaused || safeChargeHolding {
+                    Text("Ricarica in pausa")
+                } else {
+                    Text("—")
+                }
                 LabeledContent("Colori") {
                     Text("\(savedColorCount) di 8")
                 }
@@ -362,7 +382,10 @@ struct ContentView: View {
                     Text(bluetooth.firmwareVersion.isEmpty ? "—" : bluetooth.firmwareVersion)
                         .monospaced()
                 }
-                if let newer = bluetooth.newerFirmware {
+                if bluetooth.firmwareUpdating {
+                    Text("Firmware in aggiornamento")
+                }
+                if let newer = bluetooth.newerFirmware, !bluetooth.firmwareUpdating {
                     Text("È disponibile il firmware \(newer) in emmaforo.michelebigi.it/firmware.")
                     Button("Aggiorna") {
                         confirmFirmware = true
@@ -543,21 +566,28 @@ struct ContentView: View {
                     get: { bluetooth.safeCharging },
                     set: { bluetooth.setSafeCharging($0) }
                 ))
+                .disabled(!bluetooth.isReady)
                 Toggle("Pausa ricarica", isOn: Binding(
                     get: { bluetooth.chargePaused },
                     set: { bluetooth.setChargePaused($0) }
                 ))
+                .disabled(!bluetooth.isReady)
                 Picker("Corrente di carica", selection: Binding(
                     get: { bluetooth.gentleCharge },
-                    set: { bluetooth.setGentleCharge($0) }
+                    set: { value in
+                        bluetooth.setGentleCharge(value)
+                        if !bluetooth.isReady && wifiUp {
+                            Task { await postChargeCurrent(gentle: value) }
+                        }
+                    }
                 )) {
                     Text("Gentile").tag(true)
                     Text("Normale").tag(false)
                 }
+                .disabled(!bluetooth.isReady && !wifiUp)
             } footer: {
                 Text("Ricarica sicura: pausa al 95%, riprende al 20%.")
             }
-            .disabled(!bluetooth.isReady)
         }
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
@@ -677,6 +707,16 @@ struct ContentView: View {
 
     private func chargeSummary(_ enabled: Bool) -> String {
         bluetooth.hasChargeReport ? (enabled ? "Attiva" : "Spenta") : "—"
+    }
+
+    private var chargeDurationText: String {
+        guard bluetooth.hasChargeReport, bluetooth.battery.valid,
+              let percent = bluetooth.battery.percent else { return "—" }
+        let target = bluetooth.safeCharging ? 95 : 100
+        let remaining = max(0, target - percent)
+        let current = bluetooth.gentleCharge ? 512 : 2048
+        let minutesTotal = (remaining * 900 * 60 + (current * 100) / 2) / (current * 100)
+        return "\(minutesTotal / 60) h \(minutesTotal % 60) min"
     }
 
     private var mixedCommand: String {
@@ -989,6 +1029,34 @@ struct ContentView: View {
     private func readPowerOnce() {
         if bluetooth.isReady {
             bluetooth.readPower()
+        }
+    }
+
+    private func refreshBoardInfo() async {
+        if bluetooth.isReady || bluetooth.firmwareUpdateWindow { return }
+        var endpoint = stationURL
+        if endpoint.isEmpty {
+            endpoint = await EmmaForoLink.resolve()
+        }
+        if bluetooth.isReady || bluetooth.firmwareUpdateWindow || endpoint.isEmpty { return }
+        guard let info = await EmmaForoAPI.info(endpoint: endpoint) else { return }
+        if bluetooth.isReady || bluetooth.firmwareUpdateWindow { return }
+        wifiUp = true
+        stationURL = endpoint
+        LampSnapshot.saveStation(endpoint)
+        bluetooth.applyLinkInfo(info)
+    }
+
+    private func postChargeCurrent(gentle: Bool) async {
+        var endpoint = stationURL
+        if endpoint.isEmpty {
+            endpoint = await EmmaForoLink.resolve()
+        }
+        guard !endpoint.isEmpty else { return }
+        if await EmmaForoAPI.setCurrent(endpoint: endpoint, gentle: gentle) {
+            wifiUp = true
+            stationURL = endpoint
+            LampSnapshot.saveStation(endpoint)
         }
     }
 }

@@ -17,6 +17,26 @@ struct EmmaForoBattery: Decodable {
     let estimated: Bool?
 }
 
+struct EmmaForoBoardInfo: Decodable {
+    let name: String
+    let wifi: String
+    let wifi_saved: Bool
+    let password_saved: Bool
+    let safe: Bool
+    let paused: Bool
+    let gentle: Bool
+    let colors: Int
+    let serial: String
+    let firmware: String
+    let preset: String
+    let percentage: Int
+    let voltage_mv: Int
+    let charging: Bool
+    let charge_status: Int
+    let fault: Int
+    let estimated: Bool
+}
+
 enum EmmaForoLink {
     static func send(command: String, blink: Bool, level: Int) async -> Bool {
         let saved = LampSnapshot.stationURL
@@ -89,6 +109,35 @@ struct EmmaForoAPI {
             return try JSONDecoder().decode(EmmaForoBattery.self, from: data)
         } catch {
             return nil
+        }
+    }
+
+    static func info(endpoint: String) async -> EmmaForoBoardInfo? {
+        guard let url = URL(string: "\(endpoint)/api/info") else { return nil }
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 4
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return try JSONDecoder().decode(EmmaForoBoardInfo.self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    static func setCurrent(endpoint: String, gentle: Bool) async -> Bool {
+        guard let url = URL(string: "\(endpoint)/api/current") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "gentle=\(gentle ? "1" : "0")".data(using: .utf8)
+        request.timeoutInterval = 4
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let statusCode = (response as? HTTPURLResponse)?.statusCode else { return false }
+            return (200..<300).contains(statusCode)
+        } catch {
+            return false
         }
     }
 
