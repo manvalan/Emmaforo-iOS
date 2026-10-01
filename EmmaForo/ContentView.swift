@@ -264,9 +264,10 @@ struct ContentView: View {
         return bluetooth.status
     }
 
-    private func batteryGlyph(percent: Int, charging: Bool) -> String {
+    private func batteryGlyph(percent: Int?, charging: Bool) -> String {
         let name: String
-        switch percent {
+        switch percent ?? -1 {
+        case ..<0: name = "battery.0percent"
         case ..<13: name = "battery.0percent"
         case ..<38: name = "battery.25percent"
         case ..<63: name = "battery.50percent"
@@ -281,14 +282,15 @@ struct ContentView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(connectionLine)
                 Spacer(minLength: 12)
-                if bluetooth.battery.valid, let percent = bluetooth.battery.percent {
-                    HStack(spacing: 4) {
-                        Image(systemName: batteryGlyph(percent: percent, charging: bluetooth.battery.charging))
+                HStack(spacing: 4) {
+                    Image(systemName: batteryGlyph(percent: bluetooth.battery.percent,
+                                                    charging: bluetooth.battery.charging))
+                    if let percent = bluetooth.battery.percent {
                         Text("\(percent)%")
                             .monospacedDigit()
                     }
-                    .accessibilityLabel("\(percent) percento")
                 }
+                .accessibilityLabel(bluetooth.battery.percent.map { "\($0) percento" } ?? "Batteria")
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
@@ -366,7 +368,7 @@ struct ContentView: View {
                     LabeledContent("Durata ricarica stimata") {
                         Text(chargeDurationText)
                     }
-                } else if bluetooth.chargePaused || safeChargeHolding {
+                } else if bluetooth.chargePaused || safeChargeHolding || safeWindowHolding {
                     Text("Ricarica in pausa")
                 } else {
                     Text("—")
@@ -594,7 +596,7 @@ struct ContentView: View {
     }
 
     private var batteryPercentText: String {
-        guard bluetooth.battery.valid, let percent = bluetooth.battery.percent else { return "—" }
+        guard let percent = bluetooth.battery.percent else { return "—" }
         return "\(percent)%"
     }
 
@@ -618,6 +620,13 @@ struct ContentView: View {
               let percent = bluetooth.battery.percent, percent >= 95,
               !bluetooth.battery.charging else { return false }
         return true
+    }
+
+    private var safeWindowHolding: Bool {
+        guard bluetooth.safeCharging, !bluetooth.chargePaused, !bluetooth.battery.charging,
+              bluetooth.battery.powerGood else { return false }
+        guard bluetooth.battery.valid, let percent = bluetooth.battery.percent else { return true }
+        return percent > 20
     }
 
     private var chargerNotice: String {
@@ -710,8 +719,7 @@ struct ContentView: View {
     }
 
     private var chargeDurationText: String {
-        guard bluetooth.hasChargeReport, bluetooth.battery.valid,
-              let percent = bluetooth.battery.percent else { return "—" }
+        guard bluetooth.hasChargeReport, let percent = bluetooth.battery.percent else { return "—" }
         let target = bluetooth.safeCharging ? 95 : 100
         let remaining = max(0, target - percent)
         let current = bluetooth.gentleCharge ? 512 : 2048

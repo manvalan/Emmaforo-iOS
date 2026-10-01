@@ -15,6 +15,7 @@ struct EmmaForoBattery: Decodable {
     let charge_status: Int?
     let fault: Int?
     let estimated: Bool?
+    let power: Bool?
 }
 
 struct EmmaForoBoardInfo: Decodable {
@@ -35,6 +36,7 @@ struct EmmaForoBoardInfo: Decodable {
     let charge_status: Int
     let fault: Int
     let estimated: Bool
+    let power: Bool?
 }
 
 enum EmmaForoLink {

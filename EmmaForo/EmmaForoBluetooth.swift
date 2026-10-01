@@ -9,6 +9,7 @@ struct BatteryStatus: Equatable {
     var charging = false
     var fault = 0
     var valid = false
+    var powerGood = false
 }
 
 protocol BatteryStatusSource: AnyObject {
@@ -35,6 +36,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     private let firmwareApproveUUID = CBUUID(string: "FFEE")
     private let firmwareNoteURL = URL(string: "https://emmaforo.michelebigi.it/firmware/version.txt")
     private let colorPresetSize = 25
+    private let lastPercentKey = "emmaforoLastBatteryPercent"
 
     @Published private(set) var status = "Bluetooth inattivo"
     @Published private(set) var isReady = false
@@ -483,13 +485,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         hasChargeReport = true
         serialNumber = info.serial
         firmwareVersion = info.firmware
-        battery = BatteryStatus(
-            percent: min(max(info.percentage, 0), 100),
-            voltageMillivolts: info.voltage_mv,
-            chargeState: info.charge_status,
-            charging: info.charging,
-            fault: info.fault,
-            valid: info.estimated)
+        storeBattery(percent: info.percentage, voltageMillivolts: info.voltage_mv,
+                     chargeState: info.charge_status, charging: info.charging, fault: info.fault,
+                     valid: info.estimated, powerGood: info.power ?? false)
         if let preset = dataFromHex(info.preset), preset.count == colorPresetSize {
             colorPreset = preset
         }
@@ -514,13 +512,35 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     }
 
     func applyRemoteBattery(_ reading: EmmaForoBattery) {
+        storeBattery(percent: reading.percentage, voltageMillivolts: reading.voltage_mv,
+                     chargeState: reading.charge_status, charging: reading.charging,
+                     fault: reading.fault ?? 0, valid: reading.estimated ?? true,
+                     powerGood: reading.power ?? false)
+    }
+
+    private func storeBattery(percent: Int, voltageMillivolts: Int?, chargeState: Int?, charging: Bool,
+                              fault: Int, valid: Bool, powerGood: Bool) {
+        let clamped = min(max(percent, 0), 100)
+        let shown: Int?
+        if valid {
+            shown = clamped
+            UserDefaults.standard.set(clamped, forKey: lastPercentKey)
+        } else if battery.percent != nil {
+            shown = battery.percent
+        } else if let stored = UserDefaults.standard.object(forKey: lastPercentKey) as? Int,
+                  (0...100).contains(stored) {
+            shown = stored
+        } else {
+            shown = nil
+        }
         battery = BatteryStatus(
-            percent: min(max(reading.percentage, 0), 100),
-            voltageMillivolts: reading.voltage_mv,
-            chargeState: reading.charge_status,
-            charging: reading.charging,
-            fault: reading.fault ?? 0,
-            valid: reading.estimated ?? true)
+            percent: shown,
+            voltageMillivolts: voltageMillivolts,
+            chargeState: chargeState,
+            charging: charging,
+            fault: fault,
+            valid: valid,
+            powerGood: powerGood)
     }
 
     private func writePower(_ command: String) {
@@ -888,13 +908,14 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
            let text = String(data: data, encoding: .utf8) {
             let values = text.split(separator: "\t", omittingEmptySubsequences: false)
             if values.count >= 2, let percentage = Int(values[0]), let millivolts = Int(values[1]) {
-                battery = BatteryStatus(
-                    percent: min(max(percentage, 0), 100),
+                storeBattery(
+                    percent: percentage,
                     voltageMillivolts: millivolts,
                     chargeState: values.count > 3 ? Int(values[3]) : nil,
                     charging: values.count > 2 && values[2] == "1",
                     fault: values.count > 4 ? Int(values[4]) ?? 0 : 0,
-                    valid: values.count < 9 || values[8] == "1")
+                    valid: values.count < 9 || values[8] == "1",
+                    powerGood: values.count > 9 && values[9] == "1")
                 if values.count > 5 { safeCharging = values[5] == "1" }
                 if values.count > 6 { chargePaused = values[6] == "1" }
                 if values.count > 7 {
