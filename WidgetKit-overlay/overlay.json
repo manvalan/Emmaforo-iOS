@@ -1,0 +1,16 @@
+{
+  "version": 0,
+  "case-sensitive": true,
+  "roots": [
+    {
+      "name": "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/System/Library/Frameworks/WidgetKit.framework/Modules/WidgetKit.swiftmodule/arm64e-apple-ios.swiftinterface",
+      "type": "file",
+      "external-contents": "/Users/michelebigi/Development/Emmaforo/firmware/app-ios/WidgetKit-overlay/arm64e-apple-ios.swiftinterface"
+    },
+    {
+      "name": "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk/System/Library/Frameworks/WidgetKit.framework/Modules/WidgetKit.swiftmodule/arm64e-apple-ios.swiftinterface",
+      "type": "file",
+      "external-contents": "/Users/michelebigi/Development/Emmaforo/firmware/app-ios/WidgetKit-overlay/arm64e-apple-ios.swiftinterface"
+    }
+  ]
+}
