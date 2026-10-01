@@ -31,6 +31,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     private let safeChargingUUID = CBUUID(string: "FFFC")
     private let colorPresetUUID = CBUUID(string: "FFFD")
     private let serialUUID = CBUUID(string: "FFFE")
+    private let firmwareVersionUUID = CBUUID(string: "FFEF")
+    private let firmwareApproveUUID = CBUUID(string: "FFEE")
+    private let firmwareNoteURL = URL(string: "https://emmaforo.michelebigi.it/firmware/version.txt")
     private let colorPresetSize = 25
 
     @Published private(set) var status = "Bluetooth inattivo"
@@ -51,6 +54,8 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     @Published private(set) var isOutOfRange = false
     @Published private(set) var deviceName = "Emmaforo"
     @Published private(set) var serialNumber = ""
+    @Published private(set) var firmwareVersion = ""
+    @Published private(set) var offeredFirmware = ""
     @Published private(set) var colorPreset: Data?
     @Published private(set) var colorPresetAck = 0
 
@@ -70,6 +75,8 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     private var safeChargingCharacteristic: CBCharacteristic?
     private var colorPresetCharacteristic: CBCharacteristic?
     private var serialCharacteristic: CBCharacteristic?
+    private var firmwareVersionCharacteristic: CBCharacteristic?
+    private var firmwareApproveCharacteristic: CBCharacteristic?
     private var scanTimeout: DispatchWorkItem?
     private var pendingDeviceName = ""
     private var pendingWrites: [(CBCharacteristic, Data)] = []
@@ -90,6 +97,21 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     private var lampWaiter: ((Bool) -> Void)?
     private var lampTimeout: DispatchWorkItem?
     private let peripheralKey = "emmaforoPeripheralID"
+    private var firmwareQuietUntil: Date?
+    private var firmwareReconnect: DispatchWorkItem?
+    private var firmwareNoteFetched: Date?
+
+    private var firmwareIsQuiet: Bool {
+        if let until = firmwareQuietUntil, Date() < until { return true }
+        return false
+    }
+
+    var newerFirmware: String? {
+        guard let offered = Int(offeredFirmware), let running = Int(firmwareVersion), offered > running else {
+            return nil
+        }
+        return offeredFirmware
+    }
 
     static let shared = EmmaForoBluetooth()
 
@@ -101,6 +123,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     }
 
     func prepareForCommand() {
+        if firmwareIsQuiet { return }
         let mark = { self.lampInFlight = true; self.connectionRequested = true }
         if Thread.isMainThread {
             mark()
@@ -110,6 +133,13 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     }
 
     func connect() {
+        refreshFirmwareNote()
+        if firmwareIsQuiet {
+            isBusy = false
+            isOutOfRange = true
+            status = "Fuori portata"
+            return
+        }
         connectionRequested = true
         guard central.state == .poweredOn else {
             isBusy = false
@@ -201,6 +231,45 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             scanWhenReady = true
             connect()
         }
+    }
+
+    func refreshFirmwareNote() {
+        if let fetched = firmwareNoteFetched, Date().timeIntervalSince(fetched) < 15 { return }
+        guard let firmwareNoteURL else { return }
+        firmwareNoteFetched = Date()
+        URLSession.shared.dataTask(with: firmwareNoteURL) { [weak self] data, response, _ in
+            guard let self else { return }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let data, let text = String(data: data, encoding: .utf8) else {
+                DispatchQueue.main.async { self.firmwareNoteFetched = nil }
+                return
+            }
+            let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async { self.offeredFirmware = trimmed }
+        }.resume()
+    }
+
+    func approveFirmware(_ version: String) {
+        guard isReady, let data = version.data(using: .utf8), let firmwareApproveCharacteristic else {
+            status = "Collega prima EmmaForo"
+            return
+        }
+        let until = Date().addingTimeInterval(120)
+        firmwareQuietUntil = until
+        connectionRequested = false
+        firmwareReconnect?.cancel()
+        let reconnect = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.firmwareQuietUntil = nil
+            self.connectionRequested = true
+            self.connect()
+        }
+        firmwareReconnect = reconnect
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: reconnect)
+        pendingWrites.append((firmwareApproveCharacteristic, data))
+        status = "Confermo il firmware…"
+        pumpWrites()
     }
 
     func configure(ssid: String, password: String) {
@@ -539,7 +608,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
             serviceDiscoveryAttempts = 0
-            peripheral.discoverCharacteristics([ssidUUID, passwordUUID, applyUUID, scanRequestUUID, scanResultsUUID, ledCommandUUID, networkStatusUUID, ledModeUUID, batteryUUID, powerUUID, deviceNameUUID, safeChargingUUID, colorPresetUUID, serialUUID], for: service)
+            peripheral.discoverCharacteristics([ssidUUID, passwordUUID, applyUUID, scanRequestUUID, scanResultsUUID, ledCommandUUID, networkStatusUUID, ledModeUUID, batteryUUID, powerUUID, deviceNameUUID, safeChargingUUID, colorPresetUUID, serialUUID, firmwareVersionUUID, firmwareApproveUUID], for: service)
             return
         }
         if serviceDiscoveryAttempts < 1 {
@@ -571,6 +640,8 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             case safeChargingUUID: safeChargingCharacteristic = characteristic
             case colorPresetUUID: colorPresetCharacteristic = characteristic
             case serialUUID: serialCharacteristic = characteristic
+            case firmwareVersionUUID: firmwareVersionCharacteristic = characteristic
+            case firmwareApproveUUID: firmwareApproveCharacteristic = characteristic
             default: break
             }
         }
@@ -592,6 +663,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         }
         if let serialCharacteristic {
             peripheral.readValue(for: serialCharacteristic)
+        }
+        if let firmwareVersionCharacteristic {
+            peripheral.readValue(for: firmwareVersionCharacteristic)
         }
         if let colorPresetCharacteristic {
             peripheral.readValue(for: colorPresetCharacteristic)
@@ -636,6 +710,22 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             } else {
                 status = "Scansione reti via Bluetooth..."
                 isBusy = true
+            }
+            pumpWrites()
+            return
+        }
+        if characteristic.uuid == firmwareApproveUUID {
+            if error != nil {
+                firmwareQuietUntil = nil
+                firmwareReconnect?.cancel()
+                status = "Errore conferma firmware"
+            } else {
+                status = "Fuori portata"
+                isOutOfRange = true
+                isReady = false
+                yielding = true
+                connectionRequested = false
+                central.cancelPeripheralConnection(peripheral)
             }
             pumpWrites()
             return
@@ -690,6 +780,12 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         if characteristic.uuid == serialUUID, let data = characteristic.value,
            let text = String(data: data, encoding: .utf8) {
             serialNumber = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return
+        }
+
+        if characteristic.uuid == firmwareVersionUUID, let data = characteristic.value,
+           let text = String(data: data, encoding: .utf8) {
+            firmwareVersion = text.trimmingCharacters(in: .whitespacesAndNewlines)
             return
         }
 

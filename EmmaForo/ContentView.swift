@@ -169,6 +169,7 @@ struct ContentView: View {
     @State private var wifiSSID = ""
     @State private var wifiPassword = ""
     @State private var confirmRest = false
+    @State private var confirmFirmware = false
     @State private var boardResting = false
     @State private var colorSlots: [LampColor?] = Array(repeating: nil, count: colorSlotCount)
     @State private var colorsDirty = false
@@ -357,6 +358,17 @@ struct ContentView: View {
                     Text(bluetooth.serialNumber.isEmpty ? "—" : bluetooth.serialNumber)
                         .monospaced()
                 }
+                LabeledContent("Firmware") {
+                    Text(bluetooth.firmwareVersion.isEmpty ? "—" : bluetooth.firmwareVersion)
+                        .monospaced()
+                }
+                if let newer = bluetooth.newerFirmware {
+                    Text("È disponibile il firmware \(newer) in emmaforo.michelebigi.it/firmware.")
+                    Button("Aggiorna") {
+                        confirmFirmware = true
+                    }
+                    .disabled(!bluetooth.isReady)
+                }
                 Button("Riposo") {
                     confirmRest = true
                 }
@@ -380,6 +392,17 @@ struct ContentView: View {
         } message: {
             Text("Il controller dorme e resta svegliabile da Bluetooth.")
         }
+        .confirmationDialog("Aggiornare il firmware?", isPresented: $confirmFirmware, titleVisibility: .visible) {
+            Button("Aggiorna") {
+                if let newer = bluetooth.newerFirmware {
+                    bluetooth.approveFirmware(newer)
+                }
+            }
+            Button("Annulla", role: .cancel) {}
+        } message: {
+            Text("La scheda scarica solo questa versione sulla rete salvata e si riavvia.")
+        }
+        .onAppear { bluetooth.refreshFirmwareNote() }
     }
 
     private var mixPreview: Color {
