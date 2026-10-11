@@ -15,9 +15,7 @@ targets:
       DEVELOPMENT_TEAM: 653SB9GBDR
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_CFBundleDisplayName: EmmaForo
-      INFOPLIST_KEY_NSLocalNetworkUsageDescription: EmmaForo cerca il controller nella rete locale.
       INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: Usa Bluetooth per configurare la rete Wi-Fi di EmmaForo.
-      INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
     dependencies:
       - target: EmmaForoWidget
   EmmaForoWidget:

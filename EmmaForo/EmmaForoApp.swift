@@ -12,10 +12,8 @@ enum EmmaForoSession {
             defer {
                 if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
             }
-            if await radio.sendLamp(command: command, blink: blink, level: level) {
-                return true
-            }
-            return await EmmaForoLink.send(command: command, blink: blink, level: level)
+            // Bluetooth only: the lamp no longer answers on the home network.
+            return await radio.sendLamp(command: command, blink: blink, level: level)
         }
     }
 }

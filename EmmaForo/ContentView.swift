@@ -157,7 +157,6 @@ private let lampPalette: [PaletteColor] = [
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var bluetooth = EmmaForoBluetooth.shared
-    @AppStorage("emmaforoStationURL") private var stationURL = ""
     @AppStorage("emmaforoLightLevel") private var lightLevel = 100.0
     @State private var tab = 0
     @State private var selectedLight: String?
@@ -180,7 +179,6 @@ struct ContentView: View {
     @State private var mixRed = 0.92
     @State private var mixGreen = 0.22
     @State private var mixBlue = 0.18
-    @State private var wifiUp = false
 
     var body: some View {
         TabView(selection: $tab) {
@@ -220,22 +218,14 @@ struct ContentView: View {
         }
         .onChange(of: bluetooth.isOutOfRange) { _, outOfRange in
             guard outOfRange else { return }
+#if DEBUG || EMMAFORO_REMOTE
             Task { await deliverPendingRemotely() }
-            Task { await refreshBoardInfo() }
+#endif
         }
         .onChange(of: tab) { _, value in
             if value == 1 { readPowerOnce() }
             if value == 2 { loadColors() }
             if value == 3 { readPowerOnce() }
-            if value == 0 || value == 1 || value == 3 {
-                Task { await refreshBoardInfo() }
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                await refreshBoardInfo()
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
-            }
         }
         .onAppear {
             colorsDirty = UserDefaults.standard.bool(forKey: colorDirtyKey)
@@ -249,17 +239,11 @@ struct ContentView: View {
             colorsDirty = false
             UserDefaults.standard.set(false, forKey: colorDirtyKey)
         }
-        .onReceive(bluetooth.$wifiEndpoint) { endpoint in
-            guard let endpoint, !endpoint.isEmpty else { return }
-            stationURL = endpoint
-            LampSnapshot.saveStation(endpoint)
-        }
     }
 
     private var connectionLine: String {
         if boardResting { return "In riposo" }
         if bluetooth.isReady { return "Connesso" }
-        if wifiUp { return "Connesso via WiFi" }
         if bluetooth.isOutOfRange { return "Fuori portata" }
         return bluetooth.status
     }
@@ -385,14 +369,20 @@ struct ContentView: View {
                         .monospaced()
                 }
                 if bluetooth.firmwareUpdating {
-                    Text("Firmware in aggiornamento")
+                    Text("Firmware in aggiornamento: la lampada lo scarica via Wi‑Fi e si riavvia.")
+                }
+                if let result = bluetooth.firmwareResult, !bluetooth.firmwareUpdating {
+                    Text(result)
                 }
                 if let newer = bluetooth.newerFirmware, !bluetooth.firmwareUpdating {
                     Text("È disponibile il firmware \(newer) in emmaforo.michelebigi.it/firmware.")
+                    if updateNeedsNetwork {
+                        Text("Per aggiornare, salva prima una rete Wi‑Fi in Configurazione: la lampada la usa solo per scaricare il firmware.")
+                    }
                     Button("Aggiorna") {
                         confirmFirmware = true
                     }
-                    .disabled(!bluetooth.isReady)
+                    .disabled(!bluetooth.isReady || updateNeedsNetwork)
                 }
                 Button("Riposo") {
                     confirmRest = true
@@ -428,7 +418,7 @@ struct ContentView: View {
             }
             Button("Annulla", role: .cancel) {}
         } message: {
-            Text("La scheda scarica solo questa versione sulla rete salvata e si riavvia.")
+            Text("La scheda accende il Wi‑Fi solo per scaricare questa versione sulla rete salvata, si riavvia e lo spegne di nuovo.")
         }
         .onAppear { bluetooth.refreshFirmwareNote() }
     }
@@ -527,7 +517,7 @@ struct ContentView: View {
                     if !bluetooth.connectedNetworkName.isEmpty {
                         Text("Sulla scheda: \(bluetooth.connectedNetworkName)")
                     }
-                    Text("Si imposta una volta. Resta sulla scheda anche dopo lo spegnimento.")
+                    Text("Serve solo per scaricare un firmware nuovo che hai approvato: per tutto il resto la lampada usa il Bluetooth e tiene il Wi‑Fi spento. Si imposta una volta e resta sulla scheda.")
                     if bluetooth.status == "Salvo la rete…" || bluetooth.status == "Rete salvata sulla scheda"
                         || bluetooth.status == "Errore invio rete" {
                         Text(bluetooth.status)
@@ -544,8 +534,6 @@ struct ContentView: View {
                 Button("Azzera rete", role: .destructive) {
                     wifiSSID = ""
                     wifiPassword = ""
-                    stationURL = ""
-                    LampSnapshot.saveStation("")
                     bluetooth.forgetNetwork()
                 }
                 .disabled(!bluetooth.isReady)
@@ -586,17 +574,12 @@ struct ContentView: View {
                 .disabled(!bluetooth.isReady)
                 Picker("Corrente di carica", selection: Binding(
                     get: { bluetooth.gentleCharge },
-                    set: { value in
-                        bluetooth.setGentleCharge(value)
-                        if !bluetooth.isReady && wifiUp {
-                            Task { await postChargeCurrent(gentle: value) }
-                        }
-                    }
+                    set: { bluetooth.setGentleCharge($0) }
                 )) {
                     Text("Gentile").tag(true)
                     Text("Normale").tag(false)
                 }
-                .disabled(!bluetooth.isReady && !wifiUp)
+                .disabled(!bluetooth.isReady)
             } footer: {
                 Text("La batteria si ferma sempre al 100%, che è il 95% della sua capacità. Ricarica sicura: resta intorno al 90% e sotto l'80% riprende con una ricarica molto gentile.")
             }
@@ -793,6 +776,10 @@ struct ContentView: View {
 
     private var savedColorCount: Int {
         colorSlots.compactMap { $0 }.count
+    }
+
+    private var updateNeedsNetwork: Bool {
+        bluetooth.hasWifiStatus && bluetooth.connectedNetworkName.isEmpty
     }
 
     private var savedNetworkName: String {
@@ -1093,16 +1080,19 @@ struct ContentView: View {
             return
         }
         pendingCommand = (command, blink)
+#if DEBUG || EMMAFORO_REMOTE
         if bluetooth.isOutOfRange {
             bluetooth.yieldToNetwork()
             Task { await deliverPendingRemotely() }
             return
         }
+#endif
+        // Bluetooth only: the command is sent as soon as the lamp is reachable.
         bluetooth.connect()
     }
 
-    private func deliverPendingRemotely() async {
 #if DEBUG || EMMAFORO_REMOTE
+    private func deliverPendingRemotely() async {
         if let pending = pendingCommand, RemoteKeyStore.load() != nil {
             let payload = "0,\(pending.command),\(pending.blink ? 1 : 0),1000,\(brightnessByte)"
             do {
@@ -1111,65 +1101,15 @@ struct ContentView: View {
                 pendingCommand = nil
                 return
             } catch {
-                // Broker not reachable: fall through to the old local path.
+                // Broker not reachable: the command waits for Bluetooth.
             }
         }
-#endif
-        for _ in 0..<4 {
-            if bluetooth.isReady { return }
-            if let pending = pendingCommand {
-                let ok = await EmmaForoLink.send(command: pending.command, blink: pending.blink, level: brightnessByte)
-                if ok {
-                    wifiUp = true
-                    pendingCommand = nil
-                    let endpoint = LampSnapshot.stationURL
-                    if !endpoint.isEmpty { stationURL = endpoint }
-                    return
-                }
-            } else {
-                let endpoint = await EmmaForoLink.resolve()
-                if !endpoint.isEmpty {
-                    wifiUp = true
-                    stationURL = endpoint
-                    return
-                }
-            }
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-        }
-        if !bluetooth.isReady { wifiUp = false }
     }
+#endif
 
     private func readPowerOnce() {
         if bluetooth.isReady {
             bluetooth.readPower()
-        }
-    }
-
-    private func refreshBoardInfo() async {
-        if bluetooth.isReady || bluetooth.firmwareUpdateWindow { return }
-        var endpoint = stationURL
-        if endpoint.isEmpty {
-            endpoint = await EmmaForoLink.resolve()
-        }
-        if bluetooth.isReady || bluetooth.firmwareUpdateWindow || endpoint.isEmpty { return }
-        guard let info = await EmmaForoAPI.info(endpoint: endpoint) else { return }
-        if bluetooth.isReady || bluetooth.firmwareUpdateWindow { return }
-        wifiUp = true
-        stationURL = endpoint
-        LampSnapshot.saveStation(endpoint)
-        bluetooth.applyLinkInfo(info)
-    }
-
-    private func postChargeCurrent(gentle: Bool) async {
-        var endpoint = stationURL
-        if endpoint.isEmpty {
-            endpoint = await EmmaForoLink.resolve()
-        }
-        guard !endpoint.isEmpty else { return }
-        if await EmmaForoAPI.setCurrent(endpoint: endpoint, gentle: gentle) {
-            wifiUp = true
-            stationURL = endpoint
-            LampSnapshot.saveStation(endpoint)
         }
     }
 }

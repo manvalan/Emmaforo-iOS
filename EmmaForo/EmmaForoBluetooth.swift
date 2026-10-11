@@ -61,7 +61,6 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     @Published private(set) var isWifiConnected = false
     @Published private(set) var hasWifiStatus = false
     @Published private(set) var isScanningNetworks = false
-    @Published private(set) var wifiEndpoint: String?
     @Published private(set) var battery = BatteryStatus()
     @Published private(set) var safeCharging = true
     @Published private(set) var chargePaused = false
@@ -73,6 +72,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     @Published private(set) var firmwareVersion = ""
     @Published private(set) var offeredFirmware = ""
     @Published private(set) var firmwareUpdating = false
+    /// The outcome of the last approved update, shown in Info.
+    @Published private(set) var firmwareResult: String?
+    private var awaitedFirmware: String?
+    private var firmwareApprovedAt: Date?
     @Published private(set) var colorPreset: Data?
     @Published private(set) var colorPresetAck = 0
 #if DEBUG || EMMAFORO_BATTERY_LOG
@@ -148,6 +151,46 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             if left < right { return nil }
         }
         return nil
+    }
+
+    /// After an approval the lamp downloads over Wi-Fi and restarts. The
+    /// download can outlast the first reconnection, so a mismatch only counts
+    /// as a failure once the lamp itself would have given up (about 6 minutes).
+    private func checkAwaitedFirmware() {
+        guard let awaited = awaitedFirmware else { return }
+        if firmwareVersion == awaited {
+            firmwareResult = "Firmware aggiornato a \(awaited)."
+            awaitedFirmware = nil
+            firmwareUpdating = false
+        } else if let approved = firmwareApprovedAt, Date().timeIntervalSince(approved) > 360 {
+            firmwareResult = "Il firmware non è stato aggiornato. Controlla la rete Wi‑Fi salvata e riprova."
+            awaitedFirmware = nil
+            firmwareUpdating = false
+        } else {
+            // Still the old version: leave the lamp alone a little longer.
+            // Firmware 1.0 keeps Wi-Fi only while no phone holds Bluetooth.
+            firmwareUpdating = true
+            stayQuietForFirmware(seconds: 60)
+            if let peripheral {
+                yielding = true
+                isReady = false
+                central.cancelPeripheralConnection(peripheral)
+            }
+        }
+    }
+
+    private func stayQuietForFirmware(seconds: TimeInterval) {
+        firmwareQuietUntil = Date().addingTimeInterval(seconds)
+        connectionRequested = false
+        firmwareReconnect?.cancel()
+        let reconnect = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.firmwareQuietUntil = nil
+            self.connectionRequested = true
+            self.connect()
+        }
+        firmwareReconnect = reconnect
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: reconnect)
     }
 
     private func versionParts(_ text: String) -> [Int]? {
@@ -307,18 +350,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             return
         }
         firmwareUpdating = true
-        let until = Date().addingTimeInterval(120)
-        firmwareQuietUntil = until
-        connectionRequested = false
-        firmwareReconnect?.cancel()
-        let reconnect = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.firmwareQuietUntil = nil
-            self.connectionRequested = true
-            self.connect()
-        }
-        firmwareReconnect = reconnect
-        DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: reconnect)
+        firmwareResult = nil
+        awaitedFirmware = version
+        firmwareApprovedAt = Date()
+        stayQuietForFirmware(seconds: 120)
         pendingWrites.append((firmwareApproveCharacteristic, data))
         status = "Confermo il firmware…"
         pumpWrites()
@@ -492,55 +527,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
 
     func forgetNetwork() {
         configure(ssid: "", password: "")
-        wifiEndpoint = nil
         connectedNetworkName = ""
         boardHasPassword = false
         hasWifiStatus = true
-    }
-
-    func applyLinkInfo(_ info: EmmaForoBoardInfo) {
-        guard !isReady else { return }
-        if !info.name.isEmpty { deviceName = info.name }
-        connectedNetworkName = info.wifi_saved ? info.wifi : ""
-        hasWifiStatus = true
-        boardHasPassword = info.password_saved
-        safeCharging = info.safe
-        chargePaused = info.paused
-        gentleCharge = info.gentle
-        hasChargeReport = true
-        serialNumber = info.serial
-        firmwareVersion = info.firmware
-        storeBattery(percent: info.percentage, voltageMillivolts: info.voltage_mv,
-                     chargeState: info.charge_status, charging: info.charging, fault: info.fault,
-                     valid: info.estimated, powerGood: info.power ?? false)
-        if let preset = dataFromHex(info.preset), preset.count == colorPresetSize {
-            colorPreset = preset
-        }
-        if !firmwareIsQuiet {
-            firmwareUpdating = false
-        }
-    }
-
-    private func dataFromHex(_ text: String) -> Data? {
-        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleaned.count == colorPresetSize * 2 else { return nil }
-        var data = Data()
-        data.reserveCapacity(colorPresetSize)
-        var index = cleaned.startIndex
-        while index < cleaned.endIndex {
-            let next = cleaned.index(index, offsetBy: 2)
-            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
-            data.append(byte)
-            index = next
-        }
-        return data.count == colorPresetSize ? data : nil
-    }
-
-    func applyRemoteBattery(_ reading: EmmaForoBattery) {
-        storeBattery(percent: reading.percentage, voltageMillivolts: reading.voltage_mv,
-                     chargeState: reading.charge_status, charging: reading.charging,
-                     fault: reading.fault ?? 0, valid: reading.estimated ?? true,
-                     powerGood: reading.power ?? false)
     }
 
     private func storeBattery(percent: Int, voltageMillivolts: Int?, chargeState: Int?, charging: Bool,
@@ -964,6 +953,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         if characteristic.uuid == firmwareVersionUUID, let data = characteristic.value,
            let text = String(data: data, encoding: .utf8) {
             firmwareVersion = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            checkAwaitedFirmware()
             return
         }
 
@@ -978,9 +968,6 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             if let first = fields.first, first == "0" || first == "1" {
                 isWifiConnected = first == "1"
                 connectedNetworkName = fields.count > 1 ? String(fields[1]) : ""
-                if fields.count > 2 {
-                    wifiEndpoint = fields[2].isEmpty ? nil : "http://\(fields[2])"
-                }
                 boardHasPassword = fields.count > 3 && fields[3] == "1"
                 hasWifiStatus = true
             } else {
