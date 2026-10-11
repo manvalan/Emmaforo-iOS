@@ -600,10 +600,41 @@ struct ContentView: View {
             } footer: {
                 Text("La batteria si ferma sempre al 100%, che è il 95% della sua capacità. Ricarica sicura: resta intorno al 90% e sotto l'80% riprende con una ricarica molto gentile.")
             }
+#if DEBUG || EMMAFORO_REMOTE
+            remoteSection
+#endif
         }
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
     }
+
+#if DEBUG || EMMAFORO_REMOTE
+    @ViewBuilder
+    private var remoteSection: some View {
+        Section {
+            Toggle("Controllo remoto", isOn: Binding(
+                get: { bluetooth.remote.enabled },
+                set: { bluetooth.setRemote(enabled: $0) }
+            ))
+            .disabled(!bluetooth.isReady || !bluetooth.remote.available)
+            Stepper(value: Binding(
+                get: { bluetooth.remote.intervalMinutes },
+                set: { bluetooth.setRemoteInterval(minutes: $0) }
+            ), in: 1...60) {
+                LabeledContent("Controllo a batteria") {
+                    Text("ogni \(bluetooth.remote.intervalMinutes) min").monospacedDigit()
+                }
+            }
+            .disabled(!bluetooth.isReady || !bluetooth.remote.enabled)
+            LabeledContent("Stato") { Text(bluetooth.remote.summary) }
+            LabeledContent("Router") { Text(bluetooth.remote.routerText) }
+        } header: {
+            Text("Controllo remoto (test)")
+        } footer: {
+            Text("Usa la rete Wi‑Fi salvata. Sul caricatore resta collegato; a batteria usa il TWT se il router Wi‑Fi 6 lo concede, altrimenti si collega a intervalli. Spento per default.")
+        }
+    }
+#endif
 
 #if DEBUG || EMMAFORO_BATTERY_LOG
     // Test builds only (Debug, or EMMAFORO_BATTERY_LOG in Active Compilation

@@ -41,6 +41,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
 #if DEBUG || EMMAFORO_BATTERY_LOG
     private let batteryLogUUID = CBUUID(string: "FFED")
 #endif
+#if DEBUG || EMMAFORO_REMOTE
+    private let remoteUUID = CBUUID(string: "FFEC")
+#endif
     private let firmwareNoteURL = URL(string: "https://emmaforo.michelebigi.it/firmware/version.txt")
     private let colorPresetSize = 25
     private let lastPercentKey = "emmaforoLastBatteryPercent"
@@ -74,6 +77,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     private var batteryLogCharacteristic: CBCharacteristic?
     private var batteryLogSamples: [Int: BatteryLogSample] = [:]
     private var batteryLogTimeout: DispatchWorkItem?
+#endif
+#if DEBUG || EMMAFORO_REMOTE
+    @Published private(set) var remote = RemoteStatus()
+    private var remoteCharacteristic: CBCharacteristic?
 #endif
 
     private var central: CBCentralManager!
@@ -683,6 +690,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         pendingLED = nil
         pendingWrites.removeAll()
         serviceDiscoveryAttempts = 0
+#if DEBUG || EMMAFORO_REMOTE
+        remote.available = false
+        remoteCharacteristic = nil
+#endif
 #if DEBUG || EMMAFORO_BATTERY_LOG
         batteryLogAvailable = false
         batteryLogCharacteristic = nil
@@ -723,6 +734,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
 #if DEBUG || EMMAFORO_BATTERY_LOG
             wanted.append(batteryLogUUID)
 #endif
+#if DEBUG || EMMAFORO_REMOTE
+            wanted.append(remoteUUID)
+#endif
             peripheral.discoverCharacteristics(wanted, for: service)
             return
         }
@@ -759,6 +773,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             case firmwareApproveUUID: firmwareApproveCharacteristic = characteristic
 #if DEBUG || EMMAFORO_BATTERY_LOG
             case batteryLogUUID: batteryLogCharacteristic = characteristic
+#endif
+#if DEBUG || EMMAFORO_REMOTE
+            case remoteUUID: remoteCharacteristic = characteristic
 #endif
             default: break
             }
@@ -799,6 +816,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             enqueue(batteryLogCharacteristic, Data("time:\(Int(Date().timeIntervalSince1970))".utf8))
         }
 #endif
+#if DEBUG || EMMAFORO_REMOTE
+        remote.available = remoteCharacteristic != nil
+        if let remoteCharacteristic { peripheral.readValue(for: remoteCharacteristic) }
+#endif
         if isReady && scanWhenReady {
             scanWhenReady = false
             scanNetworks()
@@ -810,6 +831,13 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         if inFlight?.uuid == characteristic.uuid {
             inFlight = nil
         }
+#if DEBUG || EMMAFORO_REMOTE
+        if characteristic.uuid == remoteUUID {
+            peripheral.readValue(for: characteristic)
+            pumpWrites()
+            return
+        }
+#endif
         if characteristic.uuid == powerUUID || characteristic.uuid == safeChargingUUID {
             pumpWrites()
             return
@@ -906,6 +934,15 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             }
             return
         }
+
+#if DEBUG || EMMAFORO_REMOTE
+        if characteristic.uuid == remoteUUID {
+            if let data = characteristic.value, let text = String(data: data, encoding: .utf8) {
+                remote.apply(text)
+            }
+            return
+        }
+#endif
 
 #if DEBUG || EMMAFORO_BATTERY_LOG
         if characteristic.uuid == batteryLogUUID {
@@ -1255,6 +1292,70 @@ extension EmmaForoBluetooth {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(document).write(to: jsonURL, options: .atomic)
         return BatteryLogExport(csv: csvURL, json: jsonURL, count: document.samples.count)
+    }
+}
+#endif
+
+#if DEBUG || EMMAFORO_REMOTE
+// Remote control over Wi-Fi (USB, TWT or interval check-in). Shown only in
+// test builds until the server side exists.
+struct RemoteStatus: Equatable {
+    var available = false
+    var enabled = false
+    var intervalMinutes = 10
+    var mode = "off"
+    var router = 0
+    var brokerConnected = false
+
+    mutating func apply(_ text: String) {
+        let fields = text.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard fields.count >= 6, fields[0] == "1" else { return }
+        enabled = fields[1] == "1"
+        intervalMinutes = Int(fields[2]) ?? intervalMinutes
+        mode = fields[3]
+        router = Int(fields[4]) ?? 0
+        brokerConnected = fields[5] == "1"
+    }
+
+    var summary: String {
+        guard enabled else { return "Spento" }
+        let link: String
+        switch mode {
+        case "usb": link = "Sul caricatore: sempre collegato"
+        case "twt": link = "A batteria con router Wi‑Fi 6 (TWT)"
+        case "interval": link = "A batteria: controllo ogni \(intervalMinutes) min"
+        default: link = "In attesa"
+        }
+        return brokerConnected ? link + ", server collegato" : link
+    }
+
+    var routerText: String {
+        switch router {
+        case 2: return "Wi‑Fi 6 con TWT"
+        case 1: return "Senza TWT"
+        default: return "Non ancora provato"
+        }
+    }
+}
+
+extension EmmaForoBluetooth {
+    func setRemote(enabled: Bool) {
+        writeRemote(enabled ? "on" : "off")
+    }
+
+    func setRemoteInterval(minutes: Int) {
+        writeRemote("interval:\(min(max(minutes, 1), 60))")
+    }
+
+    func setRemoteBroker(uri: String, user: String, password: String) {
+        writeRemote("broker:\(uri)")
+        writeRemote("user:\(user)")
+        writeRemote("pass:\(password)")
+    }
+
+    private func writeRemote(_ command: String) {
+        guard isReady, let remoteCharacteristic else { return }
+        enqueue(remoteCharacteristic, Data(command.utf8))
     }
 }
 #endif
