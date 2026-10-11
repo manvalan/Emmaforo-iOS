@@ -405,6 +405,9 @@ struct ContentView: View {
                     Text("Apache License 2.0")
                 }
             }
+#if DEBUG || EMMAFORO_BATTERY_LOG
+            batteryLogSection
+#endif
         }
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
@@ -557,11 +560,18 @@ struct ContentView: View {
                 LabeledContent("Stato") {
                     Text(chargeStatusText)
                 }
+                if let rate = bluetooth.battery.ratePercentPerHour {
+                    LabeledContent("Variazione") {
+                        Text(String(format: "%+.1f %%/h", rate)).monospacedDigit()
+                    }
+                }
                 Text(chargerNotice)
             } header: {
                 Text("Batteria")
             } footer: {
-                Text("La percentuale è una stima, non una misura.")
+                Text(bluetooth.battery.gauge
+                     ? "La percentuale è misurata dal fuel gauge della scheda."
+                     : "La percentuale è una stima, non una misura.")
             }
             Section {
                 Toggle("Ricarica sicura", isOn: Binding(
@@ -588,12 +598,50 @@ struct ContentView: View {
                 }
                 .disabled(!bluetooth.isReady && !wifiUp)
             } footer: {
-                Text("Ricarica sicura: pausa al 95%, riprende al 20%.")
+                Text("La batteria si ferma sempre al 100%, che è il 95% della sua capacità. Ricarica sicura: resta intorno al 90% e sotto l'80% riprende con una ricarica molto gentile.")
             }
         }
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
     }
+
+#if DEBUG || EMMAFORO_BATTERY_LOG
+    // Test builds only (Debug, or EMMAFORO_BATTERY_LOG in Active Compilation
+    // Conditions). The App Store build has no trace of this section.
+    @ViewBuilder
+    private var batteryLogSection: some View {
+        Section {
+            switch bluetooth.batteryLogState {
+            case .idle:
+                Text(bluetooth.batteryLogAvailable ? "Pronto" : "Il firmware della scheda non ha il registro.")
+            case .receiving(let count):
+                HStack {
+                    ProgressView()
+                    Text("Ricevo \(count) campioni…").monospacedDigit()
+                }
+            case .ready(let export):
+                Text("\(export.count) campioni pronti")
+                ShareLink(items: [export.csv, export.json]) {
+                    Label("Esporta CSV e JSON", systemImage: "square.and.arrow.up")
+                }
+            case .failed(let reason):
+                Text(reason)
+            }
+            Button("Scarica registro") {
+                bluetooth.downloadBatteryLog()
+            }
+            .disabled(!bluetooth.isReady || !bluetooth.batteryLogAvailable)
+            Button("Azzera registro", role: .destructive) {
+                bluetooth.clearBatteryLog()
+            }
+            .disabled(!bluetooth.isReady || !bluetooth.batteryLogAvailable)
+        } header: {
+            Text("Registro batteria (test)")
+        } footer: {
+            Text("La scheda registra tensione, carica e consumo ogni due minuti, per circa quattro giorni. Visibile solo nelle build di test.")
+        }
+    }
+#endif
 
     private var batteryPercentText: String {
         guard let percent = bluetooth.battery.percent else { return "—" }
@@ -617,7 +665,7 @@ struct ContentView: View {
 
     private var safeChargeHolding: Bool {
         guard bluetooth.safeCharging, !bluetooth.chargePaused, bluetooth.battery.valid,
-              let percent = bluetooth.battery.percent, percent >= 95,
+              let percent = bluetooth.battery.percent, percent >= 90,
               !bluetooth.battery.charging else { return false }
         return true
     }
@@ -626,13 +674,13 @@ struct ContentView: View {
         guard bluetooth.safeCharging, !bluetooth.chargePaused, !bluetooth.battery.charging,
               bluetooth.battery.powerGood else { return false }
         guard bluetooth.battery.valid, let percent = bluetooth.battery.percent else { return true }
-        return percent > 20
+        return percent >= 80
     }
 
     private var chargerNotice: String {
         let fault = bluetooth.battery.fault
         if fault == 0 {
-            return safeChargeHolding ? "Ricarica sicura: in pausa al 95%." : "Nessun guasto"
+            return safeChargeHolding ? "Ricarica sicura: in pausa intorno al 90%." : "Nessun guasto"
         }
         if fault & 0x08 != 0 {
             return "La tensione della batteria è troppo alta."
@@ -720,10 +768,11 @@ struct ContentView: View {
 
     private var chargeDurationText: String {
         guard bluetooth.hasChargeReport, let percent = bluetooth.battery.percent else { return "—" }
-        let target = bluetooth.safeCharging ? 95 : 100
+        // 100% shown is 95% of the 900 mAh cell: one shown percent is 8.55 mAh.
+        let target = bluetooth.safeCharging ? 90 : 100
         let remaining = max(0, target - percent)
-        let current = bluetooth.gentleCharge ? 512 : 2048
-        let minutesTotal = (remaining * 900 * 60 + (current * 100) / 2) / (current * 100)
+        let current = bluetooth.safeCharging ? 192 : (bluetooth.gentleCharge ? 448 : 896)
+        let minutesTotal = (remaining * 855 * 60 + (current * 100) / 2) / (current * 100)
         return "\(minutesTotal / 60) h \(minutesTotal % 60) min"
     }
 

@@ -10,6 +10,10 @@ struct BatteryStatus: Equatable {
     var fault = 0
     var valid = false
     var powerGood = false
+    /// The board measured the percent with its MAX17048 fuel gauge (firmware after 1.0).
+    var gauge = false
+    /// Charge (+) or discharge (-) rate in %/h, reported only with the fuel gauge.
+    var ratePercentPerHour: Double?
 }
 
 protocol BatteryStatusSource: AnyObject {
@@ -34,6 +38,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     private let serialUUID = CBUUID(string: "FFFE")
     private let firmwareVersionUUID = CBUUID(string: "FFEF")
     private let firmwareApproveUUID = CBUUID(string: "FFEE")
+#if DEBUG || EMMAFORO_BATTERY_LOG
+    private let batteryLogUUID = CBUUID(string: "FFED")
+#endif
     private let firmwareNoteURL = URL(string: "https://emmaforo.michelebigi.it/firmware/version.txt")
     private let colorPresetSize = 25
     private let lastPercentKey = "emmaforoLastBatteryPercent"
@@ -61,6 +68,13 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     @Published private(set) var firmwareUpdating = false
     @Published private(set) var colorPreset: Data?
     @Published private(set) var colorPresetAck = 0
+#if DEBUG || EMMAFORO_BATTERY_LOG
+    @Published private(set) var batteryLogAvailable = false
+    @Published private(set) var batteryLogState: BatteryLogState = .idle
+    private var batteryLogCharacteristic: CBCharacteristic?
+    private var batteryLogSamples: [Int: BatteryLogSample] = [:]
+    private var batteryLogTimeout: DispatchWorkItem?
+#endif
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -519,7 +533,8 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     }
 
     private func storeBattery(percent: Int, voltageMillivolts: Int?, chargeState: Int?, charging: Bool,
-                              fault: Int, valid: Bool, powerGood: Bool) {
+                              fault: Int, valid: Bool, powerGood: Bool, gauge: Bool = false,
+                              ratePercentPerHour: Double? = nil) {
         let clamped = min(max(percent, 0), 100)
         let shown: Int?
         if valid {
@@ -540,7 +555,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             charging: charging,
             fault: fault,
             valid: valid,
-            powerGood: powerGood)
+            powerGood: powerGood,
+            gauge: gauge,
+            ratePercentPerHour: ratePercentPerHour)
     }
 
     private func writePower(_ command: String) {
@@ -666,6 +683,13 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         pendingLED = nil
         pendingWrites.removeAll()
         serviceDiscoveryAttempts = 0
+#if DEBUG || EMMAFORO_BATTERY_LOG
+        batteryLogAvailable = false
+        batteryLogCharacteristic = nil
+        if case .receiving = batteryLogState {
+            failBatteryLog("Collegamento interrotto")
+        }
+#endif
         if yielding {
             yielding = false
             isOutOfRange = true
@@ -695,7 +719,11 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
             serviceDiscoveryAttempts = 0
-            peripheral.discoverCharacteristics([ssidUUID, passwordUUID, applyUUID, scanRequestUUID, scanResultsUUID, ledCommandUUID, networkStatusUUID, ledModeUUID, batteryUUID, powerUUID, deviceNameUUID, safeChargingUUID, colorPresetUUID, serialUUID, firmwareVersionUUID, firmwareApproveUUID], for: service)
+            var wanted = [ssidUUID, passwordUUID, applyUUID, scanRequestUUID, scanResultsUUID, ledCommandUUID, networkStatusUUID, ledModeUUID, batteryUUID, powerUUID, deviceNameUUID, safeChargingUUID, colorPresetUUID, serialUUID, firmwareVersionUUID, firmwareApproveUUID]
+#if DEBUG || EMMAFORO_BATTERY_LOG
+            wanted.append(batteryLogUUID)
+#endif
+            peripheral.discoverCharacteristics(wanted, for: service)
             return
         }
         if serviceDiscoveryAttempts < 1 {
@@ -729,6 +757,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             case serialUUID: serialCharacteristic = characteristic
             case firmwareVersionUUID: firmwareVersionCharacteristic = characteristic
             case firmwareApproveUUID: firmwareApproveCharacteristic = characteristic
+#if DEBUG || EMMAFORO_BATTERY_LOG
+            case batteryLogUUID: batteryLogCharacteristic = characteristic
+#endif
             default: break
             }
         }
@@ -760,6 +791,14 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         if let colorPresetCharacteristic {
             peripheral.readValue(for: colorPresetCharacteristic)
         }
+#if DEBUG || EMMAFORO_BATTERY_LOG
+        batteryLogAvailable = batteryLogCharacteristic != nil
+        if let batteryLogCharacteristic {
+            peripheral.setNotifyValue(true, for: batteryLogCharacteristic)
+            // Lets the board stamp later samples with real time.
+            enqueue(batteryLogCharacteristic, Data("time:\(Int(Date().timeIntervalSince1970))".utf8))
+        }
+#endif
         if isReady && scanWhenReady {
             scanWhenReady = false
             scanNetworks()
@@ -868,6 +907,13 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             return
         }
 
+#if DEBUG || EMMAFORO_BATTERY_LOG
+        if characteristic.uuid == batteryLogUUID {
+            if let data = characteristic.value { receiveBatteryLog(data) }
+            return
+        }
+#endif
+
         if characteristic.uuid == serialUUID, let data = characteristic.value,
            let text = String(data: data, encoding: .utf8) {
             serialNumber = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -915,7 +961,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
                     charging: values.count > 2 && values[2] == "1",
                     fault: values.count > 4 ? Int(values[4]) ?? 0 : 0,
                     valid: values.count < 9 || values[8] == "1",
-                    powerGood: values.count > 9 && values[9] == "1")
+                    powerGood: values.count > 9 && values[9] == "1",
+                    gauge: values.count > 10 && values[10] == "1",
+                    ratePercentPerHour: values.count > 11 && values[10] == "1"
+                        ? Int(values[11]).map { Double($0) / 10 } : nil)
                 if values.count > 5 { safeCharging = values[5] == "1" }
                 if values.count > 6 { chargePaused = values[6] == "1" }
                 if values.count > 7 {
@@ -988,3 +1037,224 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         scanBuffer = ""
     }
 }
+
+#if DEBUG || EMMAFORO_BATTERY_LOG
+// Battery log for test devices. Compiled only into Debug builds, or builds
+// that add EMMAFORO_BATTERY_LOG to Active Compilation Conditions, never into
+// the App Store build. The board keeps the samples in RAM; this reads them over
+// Bluetooth and writes CSV and JSON files for the share sheet.
+
+struct BatteryLogSample: Codable {
+    let index: Int
+    let boot: Int
+    let unixTime: Int?
+    let uptimeSeconds: Int?
+    let voltageMillivolts: Int
+    let realPercent: Double?
+    let shownPercent: Double?
+    let ratePercentPerHour: Double
+    let chargeMilliamps: Int
+    let charging: Bool
+    let powerGood: Bool
+    let lampOn: Bool
+    let ledLoad: Int
+    let wifiOn: Bool
+    let bleConnected: Bool
+    let resting: Bool
+    let gauge: Bool
+    let chargeState: Int
+}
+
+struct BatteryLogExport: Equatable {
+    let csv: URL
+    let json: URL
+    let count: Int
+}
+
+enum BatteryLogState: Equatable {
+    case idle
+    case receiving(Int)
+    case ready(BatteryLogExport)
+    case failed(String)
+}
+
+private struct BatteryLogDocument: Encodable {
+    let format = 1
+    let exportedAt: String
+    let deviceName: String
+    let serialNumber: String
+    let firmware: String
+    let capacity: Int
+    let periodSeconds: Int
+    let boardUptimeSeconds: Int
+    let currentBoot: Int
+    let note = "realPercent is the cell state of charge; shownPercent is what the app shows (95% real = 100% shown)."
+    let samples: [BatteryLogSample]
+}
+
+extension EmmaForoBluetooth {
+    private static let logDataMarker: UInt8 = 0xB1
+    private static let logEndMarker: UInt8 = 0xBE
+    private static let logSampleSize = 16
+    private static let realFullPercent = 95.0
+
+    func downloadBatteryLog() {
+        guard isReady, let batteryLogCharacteristic else {
+            batteryLogState = .failed("Collega prima EmmaForo")
+            return
+        }
+        if case .receiving = batteryLogState { return }
+        batteryLogSamples = [:]
+        batteryLogState = .receiving(0)
+        armBatteryLogTimeout()
+        enqueue(batteryLogCharacteristic, Data("time:\(Int(Date().timeIntervalSince1970))".utf8))
+        enqueue(batteryLogCharacteristic, Data("dump".utf8))
+    }
+
+    func clearBatteryLog() {
+        guard isReady, let batteryLogCharacteristic else { return }
+        enqueue(batteryLogCharacteristic, Data("clear".utf8))
+        batteryLogState = .idle
+    }
+
+    fileprivate func failBatteryLog(_ reason: String) {
+        batteryLogTimeout?.cancel()
+        batteryLogSamples = [:]
+        batteryLogState = .failed(reason)
+    }
+
+    private func armBatteryLogTimeout() {
+        batteryLogTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, case .receiving = self.batteryLogState else { return }
+            self.failBatteryLog("La scheda non risponde")
+        }
+        batteryLogTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeout)
+    }
+
+    fileprivate func receiveBatteryLog(_ data: Data) {
+        guard case .receiving = batteryLogState, let marker = data.first else { return }
+        let bytes = [UInt8](data)
+        func u16(_ at: Int) -> Int { Int(bytes[at]) | Int(bytes[at + 1]) << 8 }
+        func u32(_ at: Int) -> Int { u16(at) | u16(at + 2) << 16 }
+        if marker == Self.logDataMarker, bytes.count >= 3 {
+            armBatteryLogTimeout()
+            let first = u16(1)
+            var offset = 3
+            var index = first
+            while offset + Self.logSampleSize <= bytes.count {
+                batteryLogSamples[index] = decodeRaw(bytes, at: offset, index: index)
+                offset += Self.logSampleSize
+                index += 1
+            }
+            batteryLogState = .receiving(batteryLogSamples.count)
+        } else if marker == Self.logEndMarker, bytes.count >= 16 {
+            batteryLogTimeout?.cancel()
+            let count = u16(1)
+            guard batteryLogSamples.count >= count else {
+                failBatteryLog("Ricevuti \(batteryLogSamples.count) campioni su \(count)")
+                return
+            }
+            let receivedAt = Date()
+            let document = makeDocument(count: count, capacity: u16(3), period: u16(5), uptime: u32(7),
+                                        boot: Int(bytes[15]), receivedAt: receivedAt)
+            do {
+                batteryLogState = .ready(try writeExport(document, at: receivedAt))
+            } catch {
+                failBatteryLog("File non scritto: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // Raw fields only; time and percent are resolved once the end packet says
+    // which boot is current and what the board uptime is.
+    private func decodeRaw(_ bytes: [UInt8], at offset: Int, index: Int) -> BatteryLogSample {
+        func u16(_ at: Int) -> Int { Int(bytes[offset + at]) | Int(bytes[offset + at + 1]) << 8 }
+        let time = u16(0) | u16(2) << 16
+        let soc = u16(6)
+        let rate = Int16(bitPattern: UInt16(u16(8)))
+        let flags = bytes[offset + 12]
+        let epoch = flags & 0x80 != 0
+        return BatteryLogSample(
+            index: index,
+            boot: Int(bytes[offset + 15]),
+            unixTime: epoch ? time : nil,
+            uptimeSeconds: epoch ? nil : time,
+            voltageMillivolts: u16(4),
+            realPercent: soc == 0xFFFF ? nil : Double(soc) / 10,
+            shownPercent: soc == 0xFFFF ? nil : min(100, Double(soc) / 10 * 100 / Self.realFullPercent),
+            ratePercentPerHour: Double(rate) / 100,
+            chargeMilliamps: u16(10),
+            charging: flags & 0x01 != 0,
+            powerGood: flags & 0x02 != 0,
+            lampOn: flags & 0x04 != 0,
+            ledLoad: Int(bytes[offset + 14]),
+            wifiOn: flags & 0x08 != 0,
+            bleConnected: flags & 0x10 != 0,
+            resting: flags & 0x20 != 0,
+            gauge: flags & 0x40 != 0,
+            chargeState: Int(bytes[offset + 13]))
+    }
+
+    private func makeDocument(count: Int, capacity: Int, period: Int, uptime: Int,
+                              boot: Int, receivedAt: Date) -> BatteryLogDocument {
+        let phoneNow = Int(receivedAt.timeIntervalSince1970)
+        let samples = (0..<count).compactMap { batteryLogSamples[$0] }.map { sample -> BatteryLogSample in
+            // Samples from the current boot without a stamp get one from the
+            // board uptime; earlier boots keep only their uptime.
+            guard sample.unixTime == nil, sample.boot == boot, let up = sample.uptimeSeconds, up <= uptime else {
+                return sample
+            }
+            return BatteryLogSample(
+                index: sample.index, boot: sample.boot, unixTime: phoneNow - (uptime - up),
+                uptimeSeconds: up, voltageMillivolts: sample.voltageMillivolts,
+                realPercent: sample.realPercent, shownPercent: sample.shownPercent,
+                ratePercentPerHour: sample.ratePercentPerHour, chargeMilliamps: sample.chargeMilliamps,
+                charging: sample.charging, powerGood: sample.powerGood, lampOn: sample.lampOn,
+                ledLoad: sample.ledLoad, wifiOn: sample.wifiOn, bleConnected: sample.bleConnected,
+                resting: sample.resting, gauge: sample.gauge, chargeState: sample.chargeState)
+        }
+        return BatteryLogDocument(
+            exportedAt: ISO8601DateFormatter().string(from: receivedAt),
+            deviceName: deviceName, serialNumber: serialNumber, firmware: firmwareVersion,
+            capacity: capacity, periodSeconds: period, boardUptimeSeconds: uptime, currentBoot: boot,
+            samples: samples)
+    }
+
+    private func writeExport(_ document: BatteryLogDocument, at date: Date) throws -> BatteryLogExport {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "yyyyMMdd-HHmm"
+        let serial = document.serialNumber.replacingOccurrences(of: ":", with: "")
+        let base = "emmaforo-battery-\(serial.isEmpty ? "board" : serial)-\(stamp.string(from: date))"
+        let folder = FileManager.default.temporaryDirectory
+        let csvURL = folder.appendingPathComponent(base + ".csv")
+        let jsonURL = folder.appendingPathComponent(base + ".json")
+
+        let iso = ISO8601DateFormatter()
+        func text(_ value: Double?) -> String { value.map { String(format: "%.1f", $0) } ?? "" }
+        func flag(_ value: Bool) -> String { value ? "1" : "0" }
+        var csv = "index,boot,time_iso,unix_s,uptime_s,voltage_mv,soc_real_pct,soc_shown_pct,rate_pct_per_h,"
+            + "charge_ma,charging,power_good,lamp_on,led_load,wifi_on,ble_connected,resting,gauge,charge_state\n"
+        for sample in document.samples {
+            let time = sample.unixTime.map { iso.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? ""
+            let columns: [String] = [
+                String(sample.index), String(sample.boot), time,
+                sample.unixTime.map(String.init) ?? "", sample.uptimeSeconds.map(String.init) ?? "",
+                String(sample.voltageMillivolts), text(sample.realPercent), text(sample.shownPercent),
+                String(format: "%.2f", sample.ratePercentPerHour), String(sample.chargeMilliamps),
+                flag(sample.charging), flag(sample.powerGood), flag(sample.lampOn), String(sample.ledLoad),
+                flag(sample.wifiOn), flag(sample.bleConnected), flag(sample.resting), flag(sample.gauge),
+                String(sample.chargeState)
+            ]
+            csv += columns.joined(separator: ",") + "\n"
+        }
+        try Data(csv.utf8).write(to: csvURL, options: .atomic)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(document).write(to: jsonURL, options: .atomic)
+        return BatteryLogExport(csv: csvURL, json: jsonURL, count: document.samples.count)
+    }
+}
+#endif
