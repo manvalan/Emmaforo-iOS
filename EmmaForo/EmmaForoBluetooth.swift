@@ -1,4 +1,8 @@
 import CoreBluetooth
+#if DEBUG || EMMAFORO_REMOTE
+import CryptoKit
+import Network
+#endif
 import Foundation
 import UIKit
 
@@ -1306,6 +1310,7 @@ struct RemoteStatus: Equatable {
     var mode = "off"
     var router = 0
     var brokerConnected = false
+    var boardHasKey = false
 
     mutating func apply(_ text: String) {
         let fields = text.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
@@ -1315,6 +1320,7 @@ struct RemoteStatus: Equatable {
         mode = fields[3]
         router = Int(fields[4]) ?? 0
         brokerConnected = fields[5] == "1"
+        boardHasKey = fields.count > 6 && fields[6] == "1"
     }
 
     var summary: String {
@@ -1339,6 +1345,22 @@ struct RemoteStatus: Equatable {
 }
 
 extension EmmaForoBluetooth {
+    /// Creates a new random key, keeps it only in this phone's Keychain and
+    /// writes it to the lamp over Bluetooth. Nothing leaves the two devices.
+    func pairRemote() {
+        guard isReady, remoteCharacteristic != nil else { return }
+        let key = SymmetricKey(size: .bits256)
+        let raw = key.withUnsafeBytes { Data($0) }
+        guard RemoteKeyStore.save(raw) else { return }
+        writeRemote("key:" + raw.map { String(format: "%02x", $0) }.joined())
+        writeRemote("on")
+    }
+
+    func forgetRemote() {
+        writeRemote("forget")
+        RemoteKeyStore.delete()
+    }
+
     func setRemote(enabled: Bool) {
         writeRemote(enabled ? "on" : "off")
     }
@@ -1356,6 +1378,231 @@ extension EmmaForoBluetooth {
     private func writeRemote(_ command: String) {
         guard isReady, let remoteCharacteristic else { return }
         enqueue(remoteCharacteristic, Data(command.utf8))
+    }
+}
+#endif
+
+#if DEBUG || EMMAFORO_REMOTE
+/// The remote key lives only in this phone's Keychain (this device only, not
+/// synced) and on the lamp. There is no account and no server-side copy.
+enum RemoteKeyStore {
+    private static let service = "com.emmaforo.remote.key"
+    private static let account = "lamp"
+
+    static func load() -> Data? {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account,
+                                    kSecReturnData as String: true]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data, data.count == 32 else { return nil }
+        return data
+    }
+
+    @discardableResult
+    static func save(_ key: Data) -> Bool {
+        delete()
+        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: account,
+                                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                   kSecValueData as String: key]
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func delete() {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+/// Same format as firmware remote_crypto.h: SHA-256(label || key) derivation,
+/// 0x01 | nonce | AES-256-GCM ciphertext | tag, plaintext u64 sequence | text.
+enum RemoteSeal {
+    static func derive(_ key: Data, _ label: String) -> Data {
+        Data(SHA256.hash(data: Data(label.utf8) + key))
+    }
+
+    static func topicID(_ key: Data) -> String {
+        derive(key, "emmaforo-topic-v1").prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func seal(_ text: String, sequence: UInt64, key: Data) -> Data? {
+        var plain = Data()
+        withUnsafeBytes(of: sequence.littleEndian) { plain.append(contentsOf: $0) }
+        plain.append(Data(text.utf8))
+        let symmetric = SymmetricKey(data: derive(key, "emmaforo-cmd-v1"))
+        guard let box = try? AES.GCM.seal(plain, using: symmetric) else { return nil }
+        return Data([0x01]) + Data(box.nonce) + box.ciphertext + box.tag
+    }
+
+    static func openState(_ data: Data, key: Data) -> String? {
+        guard data.count > 1 + 12 + 16 + 8, data.first == 0x01 else { return nil }
+        let bytes = Data(data)
+        guard let nonce = try? AES.GCM.Nonce(data: bytes[1..<13]),
+              let box = try? AES.GCM.SealedBox(nonce: nonce, ciphertext: bytes[13..<(bytes.count - 16)],
+                                               tag: bytes[(bytes.count - 16)...]),
+              let plain = try? AES.GCM.open(box, using: SymmetricKey(data: derive(key, "emmaforo-state-v1")))
+        else { return nil }
+        return String(data: plain.dropFirst(8), encoding: .utf8)
+    }
+}
+
+/// A minimal MQTT 3.1.1 client over TLS, enough to publish one sealed command
+/// and read the lamp's retained (sealed) state. No third-party code.
+final class RemoteClient {
+    static let host = "emmaforo.michelebigi.it"
+    static let port: UInt16 = 8883
+
+    enum Failure: Error { case noKey, network, refused, timeout }
+
+    /// Sends a command with the same text the app writes over Bluetooth.
+    /// Returns the lamp's last state JSON when the broker has one.
+    static func send(_ command: String) async throws -> String? {
+        guard let key = RemoteKeyStore.load() else { throw Failure.noKey }
+        let topic = "emmaforo/\(RemoteSeal.topicID(key))"
+        // Milliseconds since 1970 always grow, which is what the lamp checks.
+        let sequence = UInt64(Date().timeIntervalSince1970 * 1000)
+        guard let sealed = RemoteSeal.seal(command, sequence: sequence, key: key) else { throw Failure.network }
+        let session = MQTTSession(host: host, port: port)
+        defer { session.close() }
+        try await session.connect()
+        try await session.publish(topic: topic + "/cmd", payload: sealed, packetID: 1)
+        let state = try? await session.retained(topic: topic + "/state", packetID: 2)
+        return state.flatMap { RemoteSeal.openState($0, key: key) }
+    }
+}
+
+private final class MQTTSession {
+    private let connection: NWConnection
+    private var buffer = Data()
+
+    init(host: String, port: UInt16) {
+        connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!,
+                                  using: .tls)
+    }
+
+    func close() {
+        connection.send(content: Data([0xE0, 0x00]), completion: .idempotent)
+        connection.cancel()
+    }
+
+    func connect() async throws {
+        try await withTimeout(8) {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                var resumed = false
+                self.connection.stateUpdateHandler = { state in
+                    guard !resumed else { return }
+                    switch state {
+                    case .ready: resumed = true; continuation.resume()
+                    case .failed, .cancelled: resumed = true; continuation.resume(throwing: RemoteClient.Failure.network)
+                    default: break
+                    }
+                }
+                self.connection.start(queue: .global(qos: .userInitiated))
+            }
+        }
+        let clientID = "p" + (0..<8).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
+        var body = Self.string("MQTT") + Data([0x04, 0x02, 0x00, 0x1E])
+        body += Self.string(clientID)
+        try await write(0x10, body)
+        let (type, payload) = try await readPacket()
+        guard type & 0xF0 == 0x20, payload.count >= 2, payload[payload.startIndex + 1] == 0 else {
+            throw RemoteClient.Failure.refused
+        }
+    }
+
+    func publish(topic: String, payload: Data, packetID: UInt16) async throws {
+        try await write(0x32, Self.string(topic) + Self.u16(packetID) + payload)
+        while true {
+            let (type, _) = try await readPacket()
+            if type & 0xF0 == 0x40 { return }
+        }
+    }
+
+    func retained(topic: String, packetID: UInt16) async throws -> Data? {
+        try await write(0x82, Self.u16(packetID) + Self.string(topic) + Data([0x00]))
+        return try await withTimeout(3) {
+            while true {
+                let (type, packet) = try await self.readPacket()
+                guard type & 0xF0 == 0x30, packet.count >= 2 else { continue }
+                let length = Int(packet[packet.startIndex]) << 8 | Int(packet[packet.startIndex + 1])
+                let qos = (type >> 1) & 0x03
+                let start = packet.startIndex + 2 + length + (qos > 0 ? 2 : 0)
+                guard start <= packet.endIndex else { continue }
+                return Data(packet[start...])
+            }
+        }
+    }
+
+    private func write(_ header: UInt8, _ body: Data) async throws {
+        var packet = Data([header])
+        var length = body.count
+        repeat {
+            var byte = UInt8(length % 128)
+            length /= 128
+            if length > 0 { byte |= 0x80 }
+            packet.append(byte)
+        } while length > 0
+        packet += body
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: packet, completion: .contentProcessed { error in
+                if error == nil { continuation.resume() } else { continuation.resume(throwing: RemoteClient.Failure.network) }
+            })
+        }
+    }
+
+    private func readPacket() async throws -> (UInt8, Data) {
+        while true {
+            if let packet = takePacket() { return packet }
+            let chunk: Data = try await withCheckedThrowingContinuation { continuation in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, done, error in
+                    if let data, !data.isEmpty { continuation.resume(returning: data) }
+                    else if error != nil || done { continuation.resume(throwing: RemoteClient.Failure.network) }
+                    else { continuation.resume(returning: Data()) }
+                }
+            }
+            buffer += chunk
+        }
+    }
+
+    private func takePacket() -> (UInt8, Data)? {
+        let bytes = [UInt8](buffer)
+        guard bytes.count >= 2 else { return nil }
+        var length = 0
+        var multiplier = 1
+        var index = 1
+        while true {
+            guard index < bytes.count else { return nil }
+            length += Int(bytes[index] & 0x7F) * multiplier
+            multiplier *= 128
+            index += 1
+            if bytes[index - 1] & 0x80 == 0 { break }
+            if index > 4 { return nil }
+        }
+        guard bytes.count >= index + length else { return nil }
+        let packet = Data(bytes[index..<(index + length)])
+        buffer = Data(bytes[(index + length)...])
+        return (bytes[0], packet)
+    }
+
+    private static func string(_ text: String) -> Data { u16(UInt16(text.utf8.count)) + Data(text.utf8) }
+    private static func u16(_ value: UInt16) -> Data { Data([UInt8(value >> 8), UInt8(value & 0xFF)]) }
+
+    private func withTimeout<T>(_ seconds: Double, _ work: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw RemoteClient.Failure.timeout
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 }
 #endif

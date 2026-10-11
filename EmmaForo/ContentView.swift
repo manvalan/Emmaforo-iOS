@@ -612,6 +612,12 @@ struct ContentView: View {
     @ViewBuilder
     private var remoteSection: some View {
         Section {
+            if !bluetooth.remote.boardHasKey || RemoteKeyStore.load() == nil {
+                Button("Abbina questo telefono") {
+                    bluetooth.pairRemote()
+                }
+                .disabled(!bluetooth.isReady || !bluetooth.remote.available)
+            }
             Toggle("Controllo remoto", isOn: Binding(
                 get: { bluetooth.remote.enabled },
                 set: { bluetooth.setRemote(enabled: $0) }
@@ -628,10 +634,16 @@ struct ContentView: View {
             .disabled(!bluetooth.isReady || !bluetooth.remote.enabled)
             LabeledContent("Stato") { Text(bluetooth.remote.summary) }
             LabeledContent("Router") { Text(bluetooth.remote.routerText) }
+            if bluetooth.remote.boardHasKey {
+                Button("Dimentica abbinamento", role: .destructive) {
+                    bluetooth.forgetRemote()
+                }
+                .disabled(!bluetooth.isReady)
+            }
         } header: {
             Text("Controllo remoto (test)")
         } footer: {
-            Text("Usa la rete Wi‑Fi salvata. Sul caricatore resta collegato; a batteria usa il TWT se il router Wi‑Fi 6 lo concede, altrimenti si collega a intervalli. Spento per default.")
+            Text("Usa la rete Wi‑Fi salvata. Sul caricatore resta collegato; a batteria usa il TWT se il router Wi‑Fi 6 lo concede, altrimenti si collega a intervalli. Spento per default. I comandi sono cifrati con una chiave che esiste solo su questo telefono e sulla lampada: il server non può leggerli e non c'è nessun account.")
         }
     }
 #endif
@@ -1090,6 +1102,19 @@ struct ContentView: View {
     }
 
     private func deliverPendingRemotely() async {
+#if DEBUG || EMMAFORO_REMOTE
+        if let pending = pendingCommand, RemoteKeyStore.load() != nil {
+            let payload = "0,\(pending.command),\(pending.blink ? 1 : 0),1000,\(brightnessByte)"
+            do {
+                // Delivered to the broker; the lamp applies it at its next wake.
+                _ = try await RemoteClient.send(payload)
+                pendingCommand = nil
+                return
+            } catch {
+                // Broker not reachable: fall through to the old local path.
+            }
+        }
+#endif
         for _ in 0..<4 {
             if bluetooth.isReady { return }
             if let pending = pendingCommand {
