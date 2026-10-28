@@ -48,6 +48,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
 #if DEBUG || EMMAFORO_REMOTE
     private let remoteUUID = CBUUID(string: "FFEC")
 #endif
+    let chainUUID = CBUUID(string: "FFEB")
+    let soundUUID = CBUUID(string: "FFEA")
+    let voiceDataUUID = CBUUID(string: "FFE9")
     private let firmwareNoteURL = URL(string: "https://emmaforo.michelebigi.it/firmware/version.txt")
     private let colorPresetSize = 25
     private let lastPercentKey = "emmaforoLastBatteryPercent"
@@ -89,6 +92,17 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     @Published private(set) var remote = RemoteStatus()
     private var remoteCharacteristic: CBCharacteristic?
 #endif
+
+    /// Color chain and speaker (firmware 1.2): see EmmaForoSound.swift.
+    @Published var chainState = ChainState()
+    @Published var sound = SoundStatus()
+    @Published var voiceUpload: VoiceUpload = .idle
+    var chainCharacteristic: CBCharacteristic?
+    var soundCharacteristic: CBCharacteristic?
+    var voiceDataCharacteristic: CBCharacteristic?
+    var voiceChunksLeft = 0
+    var voiceChunksTotal = 0
+    var voiceSlotInFlight: Int?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -569,7 +583,11 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         characteristic.uuid == ssidUUID || characteristic.uuid == passwordUUID || characteristic.uuid == applyUUID
     }
 
-    private func enqueue(_ characteristic: CBCharacteristic, _ data: Data) {
+    func pendingWritesDrop(_ match: (CBCharacteristic) -> Bool) {
+        pendingWrites.removeAll { match($0.0) }
+    }
+
+    func enqueue(_ characteristic: CBCharacteristic, _ data: Data) {
         pendingWrites.append((characteristic, data))
         pumpWrites()
     }
@@ -683,6 +701,13 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         pendingLED = nil
         pendingWrites.removeAll()
         serviceDiscoveryAttempts = 0
+        chainCharacteristic = nil
+        soundCharacteristic = nil
+        voiceDataCharacteristic = nil
+        chainState.available = false
+        sound.available = false
+        if case .sending = voiceUpload { voiceUpload = .failed("Collegamento interrotto") }
+        voiceSlotInFlight = nil
 #if DEBUG || EMMAFORO_REMOTE
         remote.available = false
         remoteCharacteristic = nil
@@ -723,7 +748,7 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
             serviceDiscoveryAttempts = 0
-            var wanted = [ssidUUID, passwordUUID, applyUUID, scanRequestUUID, scanResultsUUID, ledCommandUUID, networkStatusUUID, ledModeUUID, batteryUUID, powerUUID, deviceNameUUID, safeChargingUUID, colorPresetUUID, serialUUID, firmwareVersionUUID, firmwareApproveUUID]
+            var wanted = [ssidUUID, passwordUUID, applyUUID, scanRequestUUID, scanResultsUUID, ledCommandUUID, networkStatusUUID, ledModeUUID, batteryUUID, powerUUID, deviceNameUUID, safeChargingUUID, colorPresetUUID, serialUUID, firmwareVersionUUID, firmwareApproveUUID, chainUUID, soundUUID, voiceDataUUID]
 #if DEBUG || EMMAFORO_BATTERY_LOG
             wanted.append(batteryLogUUID)
 #endif
@@ -764,6 +789,9 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             case serialUUID: serialCharacteristic = characteristic
             case firmwareVersionUUID: firmwareVersionCharacteristic = characteristic
             case firmwareApproveUUID: firmwareApproveCharacteristic = characteristic
+            case chainUUID: chainCharacteristic = characteristic
+            case soundUUID: soundCharacteristic = characteristic
+            case voiceDataUUID: voiceDataCharacteristic = characteristic
 #if DEBUG || EMMAFORO_BATTERY_LOG
             case batteryLogUUID: batteryLogCharacteristic = characteristic
 #endif
@@ -801,6 +829,10 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         if let colorPresetCharacteristic {
             peripheral.readValue(for: colorPresetCharacteristic)
         }
+        chainState.available = chainCharacteristic != nil
+        sound.available = soundCharacteristic != nil
+        if let chainCharacteristic { peripheral.readValue(for: chainCharacteristic) }
+        if let soundCharacteristic { peripheral.readValue(for: soundCharacteristic) }
 #if DEBUG || EMMAFORO_BATTERY_LOG
         batteryLogAvailable = batteryLogCharacteristic != nil
         if let batteryLogCharacteristic {
@@ -832,6 +864,12 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
         }
 #endif
         if characteristic.uuid == powerUUID || characteristic.uuid == safeChargingUUID {
+            pumpWrites()
+            return
+        }
+        if characteristic.uuid == chainUUID || characteristic.uuid == soundUUID
+            || characteristic.uuid == voiceDataUUID {
+            soundWriteFinished(characteristic, error: error)
             pumpWrites()
             return
         }
@@ -936,6 +974,16 @@ final class EmmaForoBluetooth: NSObject, ObservableObject, BatteryStatusSource, 
             return
         }
 #endif
+
+        if characteristic.uuid == chainUUID, let data = characteristic.value {
+            chainState.apply(data)
+            return
+        }
+        if characteristic.uuid == soundUUID, let data = characteristic.value,
+           let text = String(data: data, encoding: .utf8) {
+            sound.apply(text)
+            return
+        }
 
 #if DEBUG || EMMAFORO_BATTERY_LOG
         if characteristic.uuid == batteryLogUUID {

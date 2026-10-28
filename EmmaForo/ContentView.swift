@@ -538,6 +538,18 @@ struct ContentView: View {
                 }
                 .disabled(!bluetooth.isReady)
             }
+            if bluetooth.chainState.available || bluetooth.sound.available {
+                Section {
+                    if bluetooth.chainState.available {
+                        NavigationLink("Catena di colori") { ChainEditorView(bluetooth: bluetooth) }
+                    }
+                    if bluetooth.sound.available {
+                        NavigationLink("Suoni") { SoundsView(bluetooth: bluetooth) }
+                    }
+                } header: {
+                    Text("Lampada")
+                }
+            }
             Section {
                 LabeledContent("Stima") {
                     Text(batteryPercentText).monospacedDigit()
