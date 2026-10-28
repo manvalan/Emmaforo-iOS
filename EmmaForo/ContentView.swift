@@ -778,7 +778,15 @@ struct ContentView: View {
 
     /// A spoken "verde", "avanti", "stop"… acts like choosing that light.
     private func voiceCommand(_ command: String) {
-        if command == "spento" {
+        if command == "catena:ferma" {
+            bluetooth.stopChain()
+        } else if command == "catena:avvia" {
+            let chain = storedChain()
+            if !chain.steps.isEmpty {
+                selectedLight = nil
+                bluetooth.startChain(chain.steps, repeats: chain.repeats)
+            }
+        } else if command == "spento" {
             selectedLight = nil
             sendLight(command: "spento", blink: false)
         } else {

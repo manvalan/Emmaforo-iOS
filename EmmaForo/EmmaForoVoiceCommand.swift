@@ -29,10 +29,17 @@ final class VoiceCommandListener: ObservableObject {
         ("spento", ["spento", "spegni", "spegniti", "spegnere"]),
     ]
 
+    private static let chainStopWords: Set<String> = ["ferma", "stop", "spegni", "basta"]
+
+    /// "catena" alone (or "avvia catena") starts the stored chain, with ferma,
+    /// stop, spegni or basta it stops it, as in the Android app.
     static func command(in text: String) -> String? {
         let tokens = text.lowercased()
             .components(separatedBy: CharacterSet.letters.inverted)
             .filter { !$0.isEmpty }
+        if tokens.contains("catena") {
+            return tokens.contains(where: chainStopWords.contains) ? "catena:ferma" : "catena:avvia"
+        }
         for token in tokens.reversed() {
             if let match = words.first(where: { $0.1.contains(token) }) { return match.0 }
         }

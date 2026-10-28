@@ -24,6 +24,13 @@ private func loadPhrases() -> [String] {
     return (0..<SoundStatus.voiceSlots).map { $0 < stored.count ? stored[$0] : "" }
 }
 
+/// The chain last edited in the app, for "avvia catena" spoken on the Semaforo tab.
+func storedChain() -> (steps: [ChainStep], repeats: Bool) {
+    guard let data = UserDefaults.standard.data(forKey: chainDefaultsKey),
+          let steps = try? JSONDecoder().decode([ChainStep].self, from: data) else { return ([], false) }
+    return (steps, UserDefaults.standard.bool(forKey: chainRepeatKey))
+}
+
 private func seconds(_ value: Double) -> String {
     value.formatted(.number.precision(.fractionLength(0...1))) + " s"
 }
