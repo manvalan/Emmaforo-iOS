@@ -157,6 +157,7 @@ private let lampPalette: [PaletteColor] = [
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var bluetooth = EmmaForoBluetooth.shared
+    @StateObject private var listener = VoiceCommandListener()
     @AppStorage("emmaforoLightLevel") private var lightLevel = 100.0
     @State private var tab = 0
     @State private var selectedLight: String?
@@ -287,6 +288,22 @@ struct ContentView: View {
                         .onTapGesture { tapLight(light) }
                         .accessibilityLabel(light.name)
                         .accessibilityAddTraits(.isButton)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            VStack(spacing: 6) {
+                Button {
+                    listener.listen { command in voiceCommand(command) }
+                } label: {
+                    Label(listener.state == .listening ? "Ascolto…" : "Parla",
+                          systemImage: listener.state == .listening ? "waveform" : "mic")
+                }
+                .buttonStyle(.bordered)
+                .disabled(boardResting)
+                if case .failed(let reason) = listener.state {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -757,6 +774,17 @@ struct ContentView: View {
         let command = lastCommand ?? selectedLight
         guard let command else { return }
         sendLight(command: command, blink: lastCommand == nil ? blink : lastBlink)
+    }
+
+    /// A spoken "verde", "avanti", "stop"… acts like choosing that light.
+    private func voiceCommand(_ command: String) {
+        if command == "spento" {
+            selectedLight = nil
+            sendLight(command: "spento", blink: false)
+        } else {
+            selectedLight = command
+            sendLight(command: command, blink: blink)
+        }
     }
 
     private func tapLight(_ light: Light) {

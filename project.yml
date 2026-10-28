@@ -16,6 +16,8 @@ targets:
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_CFBundleDisplayName: EmmaForo
       INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: Usa Bluetooth per configurare la rete Wi-Fi di EmmaForo.
+      INFOPLIST_KEY_NSMicrophoneUsageDescription: Usa il microfono solo dopo che premi Parla, per cambiare colore a voce.
+      INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Riconosce rosso, giallo, verde o spento per cambiare colore a voce.
     dependencies:
       - target: EmmaForoWidget
   EmmaForoWidget:

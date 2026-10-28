@@ -177,6 +177,10 @@ extension EmmaForoBluetooth {
             } else if voiceChunksLeft == 0 {
                 voiceSlotInFlight = nil
                 voiceUpload = .done(slot)
+                // Messages 1-3 go with rosso, giallo and verde unless those already have a sound.
+                if let state = LampSoundState(rawValue: slot), slot < 3, sound.map[slot] == 0 {
+                    setSound(SoundStatus.voiceFirst + slot, for: state)
+                }
             }
         }
         if characteristic.uuid == soundUUID, let soundCharacteristic {

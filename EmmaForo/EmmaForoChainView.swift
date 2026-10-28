@@ -15,8 +15,12 @@ private func soundChoices(_ phrases: [String]) -> [(Int, String)] {
     return choices
 }
 
+/// Suggested messages for rosso, giallo and verde; the first three slots are
+/// also linked to those states the first time they are sent.
+private let suggestedPhrases = ["Stop", "Attenzione", "Avanti", "", ""]
+
 private func loadPhrases() -> [String] {
-    let stored = UserDefaults.standard.stringArray(forKey: voicePhrasesKey) ?? []
+    guard let stored = UserDefaults.standard.stringArray(forKey: voicePhrasesKey) else { return suggestedPhrases }
     return (0..<SoundStatus.voiceSlots).map { $0 < stored.count ? stored[$0] : "" }
 }
 

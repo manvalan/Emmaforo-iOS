@@ -10,6 +10,7 @@
 		789E6D373CC150A88C7C2EA4 /* EmmaForoWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3A4BFD48AC98A8B9CC461175 /* EmmaForoWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		907D4C17CE2C03BD5D71F1B9 /* EmmaForoBluetooth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 522D914D102183C9DCD94A81 /* EmmaForoBluetooth.swift */; };
 		A1C0FFEB00000000000000B2 /* EmmaForoChainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0FFEB00000000000000A2 /* EmmaForoChainView.swift */; };
+		A1C0FFEB00000000000000B3 /* EmmaForoVoiceCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0FFEB00000000000000A3 /* EmmaForoVoiceCommand.swift */; };
 		A1C0FFEB00000000000000B1 /* EmmaForoSound.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0FFEB00000000000000A1 /* EmmaForoSound.swift */; };
 		9C26D5FFBBF163B187C5D1A2 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44D85112107041E3C6A76D57 /* APIClient.swift */; };
 		D1E36BDAA1B56740DE14C681 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07BE3A2A2DA60BC9DE8D41F /* ContentView.swift */; };
@@ -80,6 +81,7 @@
 		44D85112107041E3C6A76D57 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		522D914D102183C9DCD94A81 /* EmmaForoBluetooth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmmaForoBluetooth.swift; sourceTree = "<group>"; };
 		A1C0FFEB00000000000000A2 /* EmmaForoChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmmaForoChainView.swift; sourceTree = "<group>"; };
+		A1C0FFEB00000000000000A3 /* EmmaForoVoiceCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmmaForoVoiceCommand.swift; sourceTree = "<group>"; };
 		A1C0FFEB00000000000000A1 /* EmmaForoSound.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmmaForoSound.swift; sourceTree = "<group>"; };
 		4D6F18C3A9B25E7041C8D2A6 /* EmmaForo.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EmmaForo.entitlements; sourceTree = "<group>"; };
 		62C387D5525B35C6200CFB9B /* EmmaForoWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmmaForoWidget.swift; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 				0B160D264EEA166648A7BA51 /* EmmaForoApp.swift */,
 				522D914D102183C9DCD94A81 /* EmmaForoBluetooth.swift */,
 				A1C0FFEB00000000000000A2 /* EmmaForoChainView.swift */,
+				A1C0FFEB00000000000000A3 /* EmmaForoVoiceCommand.swift */,
 				A1C0FFEB00000000000000A1 /* EmmaForoSound.swift */,
 			);
 			path = EmmaForo;
@@ -292,6 +295,7 @@
 				F1A2B3C4D5E6F708192A3B4C /* EmmaForoIntents.swift in Sources */,
 				907D4C17CE2C03BD5D71F1B9 /* EmmaForoBluetooth.swift in Sources */,
 				A1C0FFEB00000000000000B2 /* EmmaForoChainView.swift in Sources */,
+				A1C0FFEB00000000000000B3 /* EmmaForoVoiceCommand.swift in Sources */,
 				A1C0FFEB00000000000000B1 /* EmmaForoSound.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -476,6 +480,8 @@
 				INFOPLIST_FILE = EmmaForo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EmmaForo;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Usa Bluetooth per configurare la rete Wi-Fi di EmmaForo.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Usa il microfono solo dopo che premi Parla, per cambiare colore a voce.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Riconosce rosso, giallo, verde o spento per cambiare colore a voce.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -542,6 +548,8 @@
 				INFOPLIST_FILE = EmmaForo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EmmaForo;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Usa Bluetooth per configurare la rete Wi-Fi di EmmaForo.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Usa il microfono solo dopo che premi Parla, per cambiare colore a voce.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Riconosce rosso, giallo, verde o spento per cambiare colore a voce.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
